@@ -1,0 +1,237 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>题库台 · 文件到题目</title>
+    <link rel="stylesheet" href="/styles.css" />
+  </head>
+  <body>
+    <div class="app-shell">
+      <aside class="sidebar">
+        <div class="brand">
+          <span class="brand-mark">Q</span>
+          <div>
+            <strong>题库台</strong>
+            <span>FILE TO PRACTICE</span>
+          </div>
+        </div>
+
+        <nav class="primary-nav" aria-label="主导航">
+          <button class="nav-item is-active" data-view="overview">
+            <span class="nav-icon">⌂</span><span>题库总览</span>
+          </button>
+          <button class="nav-item" data-view="practice">
+            <span class="nav-icon">◉</span><span>开始刷题</span>
+          </button>
+          <button class="nav-item" data-view="wrong-book">
+            <span class="nav-icon">▣</span><span>错题本</span><span id="wrong-book-count" class="nav-count">0</span>
+          </button>
+        </nav>
+
+        <div class="sidebar-section">
+          <div class="section-kicker">
+            <span>题库模块</span>
+            <span id="module-count">0</span>
+          </div>
+          <div id="module-list" class="module-list"></div>
+        </div>
+
+        <div class="sidebar-footer">
+          <div class="status-dot"></div>
+          <div>
+            <strong>本地题库</strong>
+            <span>数据保存在当前电脑</span>
+          </div>
+        </div>
+      </aside>
+
+      <main class="main-content">
+        <header class="topbar">
+          <div>
+            <div class="breadcrumb">题库工作台 <span>/</span> <span id="breadcrumb-current">总览</span></div>
+            <h1 id="page-title">把文件变成可以练习的题目</h1>
+          </div>
+          <div class="topbar-actions">
+            <span class="sync-state"><span class="status-dot"></span> 已同步到本地</span>
+            <button id="header-upload" class="button button-primary"><span>＋</span> 导入文件</button>
+          </div>
+        </header>
+
+        <section id="overview-view" class="view">
+          <div class="overview-grid">
+            <section class="intro-panel">
+              <div class="eyebrow">IMPORT · PARSE · PRACTICE</div>
+              <h2>一次上传，<br /><em>自动整理成题库。</em></h2>
+              <p>支持 PDF、Word、PPTX、TXT 和 Markdown。系统会按文件名归档，同名文件自动追加到同一模块。</p>
+              <div class="intro-meta">
+                <span><i class="meta-dot green"></i> 本地解析</span>
+                <span><i class="meta-dot yellow"></i> 保留待校正题</span>
+                <span><i class="meta-dot blue"></i> 解析后即可练习</span>
+              </div>
+            </section>
+
+            <section id="drop-zone" class="upload-panel" aria-label="上传题目和答案文件">
+              <input id="question-file-input" type="file" accept=".pdf,.docx,.pptx,.txt,.md" hidden />
+              <input id="answer-file-input" type="file" accept=".pdf,.docx,.pptx,.txt,.md" hidden />
+              <div class="upload-icon">↑</div>
+              <h3>分别上传题目和答案</h3>
+              <p>选择题目文件后，可再选择答案文件<br />系统会按题号精准匹配，并尝试提取题目配图</p>
+              <div class="upload-slots">
+                <div class="upload-slot">
+                  <span class="upload-slot-label">题目文件 <b>必选</b></span>
+                  <button id="select-question-file" class="button button-dark">选择题目文件 <span>↗</span></button>
+                  <span id="question-file-name" class="upload-file-name">尚未选择</span>
+                </div>
+                <div class="upload-slot">
+                  <span class="upload-slot-label">答案文件 <b>可选</b></span>
+                  <button id="select-answer-file" class="button button-quiet">选择答案文件 <span>↗</span></button>
+                  <span id="answer-file-name" class="upload-file-name">尚未选择</span>
+                </div>
+              </div>
+              <div class="upload-actions">
+                <button id="submit-upload" class="button button-primary" disabled>开始导入 <span>↗</span></button>
+                <button id="clear-upload" class="button button-quiet">清空选择</button>
+              </div>
+              <div class="upload-types">PDF · DOCX · PPTX · TXT · MD</div>
+              <div id="upload-progress" class="upload-progress" hidden>
+                <span class="spinner"></span><span id="upload-progress-text">正在解析文件…</span>
+              </div>
+            </section>
+          </div>
+
+          <div class="metrics-row">
+            <div class="metric-item">
+              <span class="metric-label">题库模块</span>
+              <strong id="metric-modules">0</strong>
+              <span class="metric-note">按文件名归档</span>
+            </div>
+            <div class="metric-item">
+              <span class="metric-label">内容总数</span>
+              <strong id="metric-questions">0</strong>
+              <span class="metric-note">题目与知识点</span>
+            </div>
+            <div class="metric-item">
+              <span class="metric-label">待校正</span>
+              <strong id="metric-pending">0</strong>
+              <span class="metric-note">答案或选项未识别</span>
+            </div>
+            <div class="metric-item">
+              <span class="metric-label">最近导入</span>
+              <strong id="metric-latest">—</strong>
+              <span class="metric-note">最后一次文件</span>
+            </div>
+          </div>
+
+          <div class="section-heading">
+            <div>
+              <div class="eyebrow">YOUR LIBRARY</div>
+              <h2>题库模块</h2>
+            </div>
+            <button id="refresh-modules" class="button button-quiet">刷新列表 <span>↻</span></button>
+          </div>
+          <section id="module-grid" class="module-grid"></section>
+        </section>
+
+        <section id="module-view" class="view" hidden>
+          <button id="back-overview" class="back-link">← 返回题库总览</button>
+          <div class="module-heading">
+            <div>
+              <div class="eyebrow">QUESTION BANK MODULE</div>
+              <h2 id="module-title">模块名称</h2>
+              <p id="module-subtitle">—</p>
+            </div>
+            <div class="module-actions">
+              <button id="start-practice" class="button button-primary">开始刷题 <span>→</span></button>
+              <button id="start-knowledge" class="button button-dark">背知识点 <span>◉</span></button>
+              <button id="delete-module" class="button button-danger">删除模块 <span>×</span></button>
+            </div>
+          </div>
+          <div id="module-alert" class="import-alert" hidden></div>
+          <div class="module-stats">
+            <div><span>题目</span><strong id="detail-question-count">0</strong></div>
+            <div><span>单选</span><strong id="detail-single-count">0</strong></div>
+            <div><span>多选</span><strong id="detail-multiple-count">0</strong></div>
+            <div><span>判断</span><strong id="detail-judge-count">0</strong></div>
+            <div><span>知识点</span><strong id="detail-knowledge-count">0</strong></div>
+            <div class="warning-stat"><span>待校正</span><strong id="detail-pending-count">0</strong></div>
+          </div>
+          <div class="section-heading compact">
+            <div>
+              <div class="eyebrow">PARSED QUESTIONS</div>
+              <h2>题目预览</h2>
+            </div>
+            <span id="module-source" class="source-caption">—</span>
+          </div>
+          <section id="question-preview-list" class="question-preview-list"></section>
+        </section>
+
+        <section id="practice-view" class="view" hidden>
+          <div class="practice-topline">
+            <button id="back-module" class="back-link">← 返回模块</button>
+            <div class="practice-progress"><span id="practice-progress-label">1 / 1</span><div><i id="practice-progress-bar"></i></div></div>
+            <span id="practice-score" class="score-label">未提交</span>
+          </div>
+          <div class="practice-layout">
+            <aside class="practice-rail">
+              <div id="practice-index-label" class="eyebrow">QUESTION INDEX</div>
+              <h3 id="practice-module-name">模块</h3>
+              <div id="practice-index" class="practice-index"></div>
+            </aside>
+            <section class="practice-card">
+              <div id="question-practice-content">
+                <div class="question-meta">
+                  <span id="practice-type">单选题</span>
+                  <span class="question-meta-right">
+                    <span class="question-timer" title="当前题用时">
+                      <span class="timer-label">单题用时</span>
+                      <span id="practice-timer" aria-live="polite">00:00</span>
+                    </span>
+                    <span id="practice-number">Q01</span>
+                  </span>
+                </div>
+                <h2 id="practice-question">题目</h2>
+                <div id="practice-options" class="practice-options"></div>
+              </div>
+              <div id="knowledge-practice-content" hidden>
+                <div class="question-meta"><span>知识点卡片</span><span id="knowledge-number">K01</span></div>
+                <h2 id="knowledge-point-text">知识点</h2>
+                <p class="knowledge-mode-caption">先回忆，再选择你对这个知识点的掌握程度。</p>
+                <div class="knowledge-actions">
+                  <button id="knowledge-forgot" class="button button-quiet">忘记了 <span>↻</span></button>
+                  <button id="knowledge-remember" class="button button-primary">记得了 <span>→</span></button>
+                </div>
+                <div id="knowledge-complete" class="knowledge-complete" hidden>
+                  <strong>这一组知识点已经复习完成</strong>
+                  <span>你可以回到模块，或者重新开始一轮。</span>
+                </div>
+              </div>
+              <div id="practice-feedback" class="practice-feedback" hidden></div>
+              <div class="practice-actions">
+                <button id="practice-submit" class="button button-dark">提交答案 <span>↗</span></button>
+                <button id="practice-next" class="button button-primary" hidden>下一题 <span>→</span></button>
+              </div>
+            </section>
+          </div>
+        </section>
+
+        <section id="wrong-book-view" class="view" hidden>
+          <div class="section-heading">
+            <div>
+              <div class="eyebrow">MANUAL REVIEW LIST</div>
+              <h2>错题本</h2>
+            </div>
+            <div class="module-actions">
+              <select id="wrong-book-filter" class="compact-select" aria-label="筛选错题分类"></select>
+              <button id="start-wrong-book-practice" class="button button-primary">手动练习 <span>→</span></button>
+            </div>
+          </div>
+          <p id="wrong-book-subtitle" class="wrong-book-hint">只有手动加入的题目会出现在这里，除非你点击删除，否则会一直保留。</p>
+          <section id="wrong-book-list" class="question-preview-list"></section>
+        </section>
+      </main>
+    </div>
+    <div id="toast-region" class="toast-region" aria-live="polite"></div>
+    <script src="/app.js"></script>
+  </body>
+</html>
