@@ -16,7 +16,7 @@ from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
-from urllib.parse import unquote, urlparse
+from urllib.parse import parse_qs, unquote, urlparse
 from xml.etree import ElementTree as ET
 
 from pypdf import PdfReader
@@ -72,7 +72,10 @@ def ensure_storage() -> None:
     UPLOAD_DIR.mkdir(exist_ok=True)
     MEDIA_DIR.mkdir(exist_ok=True)
     if not DB_PATH.exists():
-        DB_PATH.write_text(json.dumps({"modules": [], "wrongBook": []}, ensure_ascii=False, indent=2), encoding="utf-8")
+        DB_PATH.write_text(
+            json.dumps({"modules": [], "wrongBook": [], "practiceProgress": {}}, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
 
 
 def load_db() -> dict[str, Any]:
@@ -82,6 +85,8 @@ def load_db() -> dict[str, Any]:
         if isinstance(payload, dict) and isinstance(payload.get("modules"), list):
             if not isinstance(payload.get("wrongBook"), list):
                 payload["wrongBook"] = []
+            if not isinstance(payload.get("practiceProgress"), dict):
+                payload["practiceProgress"] = {}
             for entry in payload["wrongBook"]:
                 entry["category"] = normalize_category(entry.get("category", "未分类"))
                 entry.setdefault("note", "")
@@ -94,7 +99,7 @@ def load_db() -> dict[str, Any]:
             return payload
     except (OSError, json.JSONDecodeError):
         pass
-    return {"modules": [], "wrongBook": []}
+    return {"modules": [], "wrongBook": [], "practiceProgress": {}}
 
 
 def save_db(payload: dict[str, Any]) -> None:
@@ -242,7 +247,13 @@ def read_pdf_text(content: bytes, media_dir: Path | None = None) -> str:
         page_text = page.extract_text() or ""
         if media_dir is not None:
             image_markers: list[str] = []
-            for image in getattr(page, "images", []):
+            try:
+                page_images = page.images
+            except Exception:
+                # A text-only PDF should still import when optional image
+                # dependencies are unavailable.
+                page_images = []
+            for image in page_images:
                 image_url = save_media_asset(image.data, image.name, media_dir)
                 if image_url not in image_markers:
                     image_markers.append(image_url)
@@ -407,6 +418,27 @@ def normalize_manual_answer(value: Any, options: list[dict[str, str]]) -> list[s
         if text and text not in answer:
             answer.append(text)
     return answer
+
+
+def normalize_manual_options(value: Any) -> list[dict[str, str]]:
+    """Validate and normalize options edited in the manual correction panel."""
+    if not isinstance(value, list):
+        raise ValueError("题目选项格式无效")
+    options: list[dict[str, str]] = []
+    seen: set[str] = set()
+    for raw_option in value:
+        if not isinstance(raw_option, dict):
+            raise ValueError("题目选项格式无效")
+        raw_key = unicodedata.normalize("NFKC", str(raw_option.get("key") or "")).strip()
+        text = unicodedata.normalize("NFKC", str(raw_option.get("text") or "")).strip()
+        if not raw_key or not text:
+            raise ValueError("每个选项都需要填写选项标记和内容")
+        key = raw_key.upper() if len(raw_key) == 1 and raw_key.isalpha() else raw_key
+        if key in seen:
+            raise ValueError(f"选项标记「{key}」重复")
+        seen.add(key)
+        options.append({"key": key, "text": text})
+    return options
 
 
 def question_type(question_text: str, answer: list[str], options: list[dict[str, str]]) -> str:
@@ -711,11 +743,16 @@ def merge_questions(existing: list[dict[str, Any]], incoming: list[dict[str, Any
             index[key] = question
             continue
         manually_corrected = previous.get("answerSource") == "manual"
+        options_manually_corrected = previous.get("optionsSource") == "manual"
+        explanation_manually_corrected = previous.get("explanationSource") == "manual"
+        has_manual_revision = (
+            manually_corrected
+            or options_manually_corrected
+            or explanation_manually_corrected
+        )
         updates = {
-            "options": question.get("options", previous.get("options", [])),
-            "explanation": question.get("explanation", previous.get("explanation", "")),
             "images": question.get("images", previous.get("images", [])),
-            "source": previous.get("source", "人工勘误") if manually_corrected else question.get(
+            "source": previous.get("source", "人工勘误") if has_manual_revision else question.get(
                 "source", previous.get("source", "自动解析")
             ),
             "needsReview": False if manually_corrected else question.get(
@@ -728,6 +765,13 @@ def merge_questions(existing: list[dict[str, Any]], incoming: list[dict[str, Any
                     "type": question.get("type", previous.get("type", "单选题")),
                     "answer": question.get("answer", previous.get("answer", [])),
                 }
+            )
+        if not options_manually_corrected:
+            updates["options"] = question.get("options", previous.get("options", []))
+        if previous.get("explanationSource") != "manual":
+            updates["explanation"] = question.get(
+                "explanation",
+                previous.get("explanation", ""),
             )
         previous.update(
             updates
@@ -765,6 +809,10 @@ def find_question(db: dict[str, Any], module_id: str, question_id: str) -> tuple
     return module, question
 
 
+def practice_progress_key(module_id: str, question_id: str) -> str:
+    return f"{module_id}::{question_id}"
+
+
 def read_json_body(handler: BaseHTTPRequestHandler) -> dict[str, Any]:
     content_length = int(handler.headers.get("Content-Length", "0") or 0)
     if content_length <= 0:
@@ -796,6 +844,19 @@ class QuestionBankHandler(BaseHTTPRequestHandler):
         if parsed.path == "/api/modules":
             db = load_db()
             json_response(self, {"modules": [module_summary(module) for module in db["modules"]]})
+            return
+        if parsed.path == "/api/practice-progress":
+            db = load_db()
+            module_id = parse_qs(parsed.query).get("moduleId", [""])[0]
+            progress = db.get("practiceProgress", {})
+            if module_id:
+                prefix = f"{module_id}::"
+                progress = {
+                    key: value
+                    for key, value in progress.items()
+                    if key.startswith(prefix)
+                }
+            json_response(self, {"progress": progress})
             return
         if parsed.path.startswith("/api/modules/"):
             module_id = parsed.path.rsplit("/", 1)[-1]
@@ -986,6 +1047,43 @@ class QuestionBankHandler(BaseHTTPRequestHandler):
 
     def do_PUT(self) -> None:
         parsed = urlparse(self.path)
+        if parsed.path == "/api/practice-progress":
+            payload = read_json_body(self)
+            module_id = str(payload.get("moduleId", ""))
+            question_id = str(payload.get("questionId", ""))
+            db = load_db()
+            module, question = find_question(db, module_id, question_id)
+            if not module or not question:
+                json_response(self, {"error": "题目不存在"}, HTTPStatus.NOT_FOUND)
+                return
+            selected_answer = payload.get("lastAnswer", [])
+            if not isinstance(selected_answer, list):
+                selected_answer = []
+            selected_answer = [str(item).strip() for item in selected_answer if str(item).strip()]
+            correct = payload.get("lastCorrect")
+            if not isinstance(correct, bool):
+                correct = None
+            try:
+                elapsed = max(0, int(payload.get("lastElapsedSeconds", 0) or 0))
+            except (TypeError, ValueError):
+                elapsed = 0
+
+            key = practice_progress_key(module_id, question_id)
+            previous = db.setdefault("practiceProgress", {}).get(key, {})
+            record = {
+                "moduleId": module_id,
+                "questionId": question_id,
+                "lastAnswer": selected_answer,
+                "lastCorrect": correct,
+                "lastElapsedSeconds": elapsed,
+                "totalElapsedSeconds": int(previous.get("totalElapsedSeconds", 0) or 0) + elapsed,
+                "attempts": int(previous.get("attempts", 0) or 0) + 1,
+                "lastAnsweredAt": utc_now(),
+            }
+            db["practiceProgress"][key] = record
+            save_db(db)
+            json_response(self, {"updated": True, "key": key, "progress": record})
+            return
         if parsed.path.startswith("/api/modules/") and "/questions/" in parsed.path:
             path_parts = [unquote(part) for part in parsed.path.rstrip("/").split("/") if part]
             if len(path_parts) != 5 or path_parts[0:2] != ["api", "modules"] or path_parts[3] != "questions":
@@ -994,8 +1092,8 @@ class QuestionBankHandler(BaseHTTPRequestHandler):
             module_id = path_parts[2]
             question_id = path_parts[4]
             payload = read_json_body(self)
-            if "answer" not in payload:
-                json_response(self, {"error": "请提供新的正确答案"}, HTTPStatus.BAD_REQUEST)
+            if "answer" not in payload and "options" not in payload:
+                json_response(self, {"error": "请提供新的选项或正确答案"}, HTTPStatus.BAD_REQUEST)
                 return
 
             db = load_db()
@@ -1004,24 +1102,45 @@ class QuestionBankHandler(BaseHTTPRequestHandler):
                 json_response(self, {"error": "题目不存在"}, HTTPStatus.NOT_FOUND)
                 return
             try:
-                answer = normalize_manual_answer(payload.get("answer"), question.get("options", []))
+                options = (
+                    normalize_manual_options(payload["options"])
+                    if "options" in payload
+                    else question.get("options", [])
+                )
+                answer = (
+                    normalize_manual_answer(payload.get("answer"), options)
+                    if "answer" in payload
+                    else question.get("answer", [])
+                )
             except ValueError as exc:
                 json_response(self, {"error": str(exc)}, HTTPStatus.BAD_REQUEST)
                 return
-            if not answer:
-                json_response(self, {"error": "至少选择或填写一个正确答案"}, HTTPStatus.BAD_REQUEST)
+            if not answer and (question.get("answer") or not options):
+                json_response(self, {"error": "请至少选择或填写一个正确答案；如果暂时没有答案，请先补充选项"}, HTTPStatus.BAD_REQUEST)
                 return
 
+            question["options"] = options
             question["answer"] = answer
             question["type"] = question_type(
                 str(question.get("text", "")),
                 answer,
-                question.get("options", []),
+                options,
             )
-            question["needsReview"] = False
-            question["answerSource"] = "manual"
-            question["answerUpdatedAt"] = utc_now()
+            question["needsReview"] = not bool(answer) or (
+                question["type"] in {"单选题", "多选题"} and not options
+            )
+            if "options" in payload:
+                question["optionsSource"] = "manual"
+                question["optionsUpdatedAt"] = utc_now()
+            if answer:
+                question["answerSource"] = "manual"
+                question["answerUpdatedAt"] = utc_now()
             question["source"] = "人工勘误"
+            if "explanation" in payload:
+                explanation = str(payload.get("explanation") or "").strip()
+                question["explanation"] = explanation or "暂无解析，请在题库中补充。"
+                question["explanationSource"] = "manual"
+                question["explanationUpdatedAt"] = utc_now()
             module["updatedAt"] = utc_now()
             save_db(db)
             json_response(self, {"updated": True, "moduleId": module_id, "question": question})
@@ -1079,6 +1198,7 @@ class QuestionBankHandler(BaseHTTPRequestHandler):
                 for item in db.get("wrongBook", [])
                 if not (item.get("moduleId") == module_id and item.get("questionId") == question_id)
             ]
+            db["practiceProgress"].pop(practice_progress_key(module_id, question_id), None)
             module["updatedAt"] = utc_now()
             save_db(db)
             json_response(
@@ -1106,6 +1226,12 @@ class QuestionBankHandler(BaseHTTPRequestHandler):
             db["wrongBook"] = [
                 item for item in db.get("wrongBook", []) if item.get("moduleId") != module_id
             ]
+            prefix = f"{module_id}::"
+            db["practiceProgress"] = {
+                key: value
+                for key, value in db.get("practiceProgress", {}).items()
+                if not key.startswith(prefix)
+            }
             save_db(db)
             json_response(
                 self,

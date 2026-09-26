@@ -195,7 +195,11 @@ button:disabled { cursor: not-allowed; opacity: .45; transform: none; }
 .practice-feedback { margin-top: 20px; padding: 15px 16px; border-left: 3px solid var(--green); background: var(--green-soft); font-size: 11px; line-height: 1.75; }
 .practice-feedback.wrong { border-color: var(--coral); background: var(--coral-soft); }
 .practice-feedback.manual { border-color: var(--yellow); background: var(--yellow-soft); }
+.practice-feedback.history { border-color: var(--blue); background: var(--blue-soft); }
 .practice-feedback strong { display: block; margin-bottom: 4px; }
+.practice-explanation { white-space: pre-wrap; }
+.practice-feedback small { display: block; margin-top: 5px; color: var(--muted); font-size: 10px; }
+.practice-history-inline { margin-top: 10px; padding-top: 10px; border-top: 1px solid rgba(63,111,157,.2); }
 .manual-mark-fields, .wrong-book-controls { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-top: 13px; }
 .feedback-actions { display: flex; justify-content: flex-end; gap: 8px; flex-wrap: wrap; margin-top: 14px; }
 .feedback-actions .button { padding: 8px 11px; font-size: 11px; }
@@ -204,9 +208,15 @@ button:disabled { cursor: not-allowed; opacity: .45; transform: none; }
 .answer-correction strong { color: var(--ink); margin-bottom: 4px; }
 .answer-correction > span { color: var(--muted); font-size: 10px; }
 .answer-correction-options { display: grid; gap: 7px; margin-top: 12px; }
+.answer-correction-option-row { display: grid; grid-template-columns: 108px minmax(0, 1fr) auto; align-items: center; gap: 8px; }
 .correction-option { border: 1px solid var(--line); background: #fff; color: var(--ink); padding: 9px 10px; text-align: left; display: flex; align-items: flex-start; gap: 9px; border-radius: 5px; line-height: 1.5; font-size: 11px; }
 .correction-option:hover, .correction-option.is-selected { border-color: var(--green); background: var(--green-soft); }
+.correction-answer-mark { color: var(--muted); font-size: 10px; }
+.correction-option.is-selected .correction-answer-mark { color: var(--green); font-weight: 700; }
+.correction-option-text { min-width: 0; width: 100%; }
+.answer-correction-add { margin-top: 9px; font-size: 11px; }
 .answer-correction-input { width: min(100%, 360px); margin-top: 12px; }
+.answer-correction-textarea { width: 100%; min-height: 96px; margin-top: 12px; border: 1px solid var(--line); background: #fff; color: var(--ink); border-radius: 6px; padding: 10px; resize: vertical; font: inherit; font-size: 11px; line-height: 1.6; }
 .practice-actions { display: flex; justify-content: flex-end; gap: 10px; margin-top: 26px; }
 .wrong-book-hint { color: var(--muted); font-size: 12px; margin: -5px 0 18px; }
 .wrong-book-item .question-preview-meta { padding-top: 3px; }
@@ -256,4 +266,6 @@ button:disabled { cursor: not-allowed; opacity: .45; transform: none; }
   .practice-rail h3 { margin-bottom: 12px; }
   .practice-progress > div { width: 90px; }
   .practice-card h2 { font-size: 20px; }
+  .answer-correction-option-row { grid-template-columns: 1fr auto; }
+  .answer-correction-option-row .correction-option-text { grid-column: 1 / -1; grid-row: 2; }
 }

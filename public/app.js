@@ -1,6 +1,7 @@
 const state = {
   modules: [],
   wrongBook: [],
+  practiceProgress: {},
   wrongBookFilter: "全部",
   selectedModule: null,
   practice: {
@@ -93,8 +94,16 @@ async function loadModules() {
     getJson("/api/modules"),
     getJson("/api/wrong-book"),
   ]);
+  let progressPayload = { progress: {} };
+  try {
+    progressPayload = await getJson("/api/practice-progress");
+  } catch (error) {
+    // Keep the library usable when an older backend does not have this optional endpoint yet.
+    console.warn("做题记录接口暂不可用，已跳过历史记录加载：", error.message);
+  }
   state.modules = payload.modules;
   state.wrongBook = wrongBookPayload.entries;
+  state.practiceProgress = progressPayload.progress || {};
   renderModuleList();
   renderMetrics();
   renderModuleGrid();
@@ -117,6 +126,34 @@ function filteredWrongBook() {
 
 function isInWrongBook(moduleId, questionId) {
   return state.wrongBook.some((entry) => entry.moduleId === moduleId && entry.question.id === questionId);
+}
+
+function practiceProgressKey(moduleId, questionId) {
+  return `${moduleId}::${questionId}`;
+}
+
+function questionPracticeProgress(question, moduleId = state.selectedModule?.id) {
+  if (!moduleId || !question?.id) return null;
+  return state.practiceProgress[practiceProgressKey(moduleId, question.id)] || null;
+}
+
+function practiceHistoryMarkup(question, moduleId = state.selectedModule?.id) {
+  const record = questionPracticeProgress(question, moduleId);
+  if (!record?.attempts) return "";
+  const answer = record.lastAnswer?.length ? record.lastAnswer.join("、") : "未记录选项";
+  const result = record.lastCorrect === true
+    ? "上次答对"
+    : record.lastCorrect === false
+      ? "上次答错"
+      : "上次已作答";
+  const answeredAt = record.lastAnsweredAt
+    ? new Date(record.lastAnsweredAt).toLocaleString("zh-CN", { dateStyle: "short", timeStyle: "short" })
+    : "";
+  return `
+    <strong>历史作答记录</strong>
+    <div>${result} · 上次答案：${escapeHtml(answer)} · 已作答 ${record.attempts} 次 · 本题累计用时 ${formatElapsed(record.totalElapsedSeconds)}</div>
+    ${answeredAt ? `<small>最近记录：${escapeHtml(answeredAt)}</small>` : ""}
+  `;
 }
 
 function renderModuleList() {
@@ -455,6 +492,20 @@ function readCategory(prefix) {
   return selected === "__new__" ? (custom || "未分类") : selected;
 }
 
+function bindCategoryEditor(prefix) {
+  const select = $(`#${prefix}-category`);
+  const input = $(`#${prefix}-new-category`);
+  if (!select || !input) return;
+  const sync = () => {
+    const isNew = select.value === "__new__";
+    input.hidden = !isNew;
+    input.required = isNew;
+    if (isNew) input.focus();
+  };
+  select.addEventListener("change", sync);
+  sync();
+}
+
 function renderPracticeIndex() {
   if (state.practice.mode === "knowledge") {
     const points = state.selectedModule.knowledgePoints || [];
@@ -480,7 +531,13 @@ function renderPracticeIndex() {
   const questions = state.selectedModule.questions;
   $("#practice-index").innerHTML = questions.map((question, index) => {
     const submitted = state.practice.submitted[question.id];
-    const status = submitted === true ? "is-correct" : submitted === false ? "is-wrong" : "";
+    const history = questionPracticeProgress(question);
+    const hasCurrentResult = Object.prototype.hasOwnProperty.call(state.practice.submitted, question.id);
+    const status = submitted === true || (!hasCurrentResult && history?.lastCorrect === true)
+      ? "is-correct"
+      : submitted === false || (!hasCurrentResult && history?.lastCorrect === false)
+        ? "is-wrong"
+        : "";
     return `<button class="${index === state.practice.index ? "is-current " : ""}${status}" data-practice-index="${index}">${String(index + 1).padStart(2, "0")}</button>`;
   }).join("");
   $$("#practice-index button").forEach((button) => {
@@ -526,22 +583,33 @@ function renderMultipleChoiceSubmit(question, submitted = false) {
 function answerCorrectionMarkup(question) {
   const correction = state.practice.correction;
   if (!correction?.open || correction.questionId !== question.id) return "";
-  const options = question.options || [];
+  const options = correction.options || [];
   const selected = correction.selected || [];
-  const optionMarkup = options.length
-    ? `<div id="answer-correction-options" class="answer-correction-options">
+  const optionMarkup = `
+      <div id="answer-correction-options" class="answer-correction-options">
         ${options.map((option) => `
-          <button type="button" class="correction-option ${selected.includes(option.key) ? "is-selected" : ""}" data-correction-key="${escapeHtml(option.key)}">
-            <span class="option-key">${escapeHtml(option.key)}</span><span>${escapeHtml(option.text)}</span>
-          </button>
+          <div class="answer-correction-option-row" data-correction-key="${escapeHtml(option.key)}">
+            <button type="button" class="correction-option ${selected.includes(option.key) ? "is-selected" : ""}" data-correction-key="${escapeHtml(option.key)}">
+              <span class="option-key">${escapeHtml(option.key)}</span>
+              <span class="correction-answer-mark">${selected.includes(option.key) ? "正确" : "选为正确"}</span>
+            </button>
+            <input class="compact-input correction-option-text" data-correction-key="${escapeHtml(option.key)}" type="text" value="${escapeHtml(option.text)}" placeholder="填写选项内容" />
+            <button type="button" class="text-button remove-correction-option" data-correction-key="${escapeHtml(option.key)}">删除</button>
+          </div>
         `).join("")}
-      </div>`
-    : `<input id="answer-correction-input" class="compact-input answer-correction-input" type="text" value="${escapeHtml(correction.raw || "")}" placeholder="填写正确答案" />`;
+      </div>
+      <button id="add-correction-option" class="button button-quiet answer-correction-add" type="button">＋ 补充选项</button>
+    `;
+  const rawAnswerMarkup = options.length
+    ? ""
+    : `<input id="answer-correction-input" class="compact-input answer-correction-input" type="text" value="${escapeHtml(correction.raw || "")}" placeholder="填写正确答案（暂时没有选项时）" />`;
   return `
     <div class="answer-correction">
-      <strong>勘误本题正确答案</strong>
-      <span>请选择一个或多个正确选项，保存后会写入本地题库。</span>
+      <strong>勘误本题选项、答案与解析</strong>
+      <span>可修改选项内容、补充缺失选项，再选择正确答案；没有答案时也可以先只保存选项。</span>
       ${optionMarkup}
+      ${rawAnswerMarkup}
+      <textarea id="answer-correction-explanation" class="answer-correction-textarea" placeholder="补充或修改本题解析、理由">${escapeHtml(correction.explanation || "")}</textarea>
       <div class="feedback-actions">
         <button id="cancel-answer-correction" class="button button-quiet" type="button">取消</button>
         <button id="save-answer-correction" class="button button-primary" type="button">保存勘误 <span>✓</span></button>
@@ -554,8 +622,10 @@ function renderAnswerCorrection(question) {
   state.practice.correction = {
     questionId: question.id,
     open: true,
+    options: (question.options || []).map((option) => ({ ...option })),
     selected: [...(question.answer || [])],
     raw: question.options?.length ? "" : (question.answer?.[0] || ""),
+    explanation: question.explanation || "",
   };
   if (state.practice.mode === "wrong-book") renderWrongBookPracticeQuestion();
   else renderPracticeQuestion();
@@ -577,13 +647,59 @@ function toggleAnswerCorrectionOption(key) {
   else renderPracticeQuestion();
 }
 
+function nextCorrectionOptionKey(options) {
+  const used = new Set(options.map((option) => String(option.key || "").toUpperCase()));
+  for (const key of "ABCDEFGHIJKLMNOPQRSTUVWXYZ") {
+    if (!used.has(key)) return key;
+  }
+  return `选项${options.length + 1}`;
+}
+
+function addAnswerCorrectionOption() {
+  const correction = state.practice.correction;
+  if (!correction) return;
+  if (!(correction.options || []).length) correction.selected = [];
+  correction.options = [
+    ...(correction.options || []),
+    { key: nextCorrectionOptionKey(correction.options || []), text: "" },
+  ];
+  if (state.practice.mode === "wrong-book") renderWrongBookPracticeQuestion();
+  else renderPracticeQuestion();
+  const inputs = $$("#answer-correction-options .correction-option-text");
+  const lastInput = inputs[inputs.length - 1];
+  lastInput?.focus();
+}
+
+function removeAnswerCorrectionOption(key) {
+  const correction = state.practice.correction;
+  if (!correction) return;
+  correction.options = (correction.options || []).filter((option) => option.key !== key);
+  correction.selected = (correction.selected || []).filter((item) => item !== key);
+  if (state.practice.mode === "wrong-book") renderWrongBookPracticeQuestion();
+  else renderPracticeQuestion();
+}
+
 function bindAnswerCorrection(question) {
   $("#answer-correction-button")?.addEventListener("click", () => renderAnswerCorrection(question));
   $$("#answer-correction-options .correction-option").forEach((button) => {
     button.addEventListener("click", () => toggleAnswerCorrectionOption(button.dataset.correctionKey));
   });
+  $$("#answer-correction-options .correction-option-text").forEach((input) => {
+    input.addEventListener("input", (event) => {
+      const correction = state.practice.correction;
+      const option = correction?.options?.find((item) => item.key === input.dataset.correctionKey);
+      if (option) option.text = event.target.value;
+    });
+  });
+  $("#add-correction-option")?.addEventListener("click", addAnswerCorrectionOption);
+  $$(".remove-correction-option").forEach((button) => {
+    button.addEventListener("click", () => removeAnswerCorrectionOption(button.dataset.correctionKey));
+  });
   $("#answer-correction-input")?.addEventListener("input", (event) => {
     if (state.practice.correction) state.practice.correction.raw = event.target.value;
+  });
+  $("#answer-correction-explanation")?.addEventListener("input", (event) => {
+    if (state.practice.correction) state.practice.correction.explanation = event.target.value;
   });
   $("#cancel-answer-correction")?.addEventListener("click", closeAnswerCorrection);
   $("#save-answer-correction")?.addEventListener("click", () => saveAnswerCorrection(question));
@@ -592,10 +708,18 @@ function bindAnswerCorrection(question) {
 async function saveAnswerCorrection(question) {
   const correction = state.practice.correction;
   if (!correction?.open || correction.questionId !== question.id) return;
-  const answer = question.options?.length
+  const options = (correction.options || []).map((option) => ({
+    key: String(option.key || "").trim(),
+    text: String(option.text || "").trim(),
+  }));
+  if (options.some((option) => !option.key || !option.text)) {
+    showToast("请补全每个选项的标记和内容，或删除空白选项", "error");
+    return;
+  }
+  const answer = options.length
     ? [...correction.selected]
     : [($("#answer-correction-input")?.value || correction.raw || "").trim()];
-  if (!answer.filter(Boolean).length) {
+  if (!answer.filter(Boolean).length && (question.answer?.length || !options.length)) {
     showToast("至少选择或填写一个正确答案", "error");
     return;
   }
@@ -603,13 +727,22 @@ async function saveAnswerCorrection(question) {
   const moduleId = entry?.moduleId || state.selectedModule?.id;
   if (!moduleId) return;
   const selectedAnswer = [...(state.practice.answers[question.id] || [])];
+  const elapsed = currentTimerSeconds();
   finishQuestionTimer();
+  const explanationField = $("#answer-correction-explanation");
+  const explanation = explanationField
+    ? explanationField.value.trim()
+    : (correction.explanation || "").trim();
   try {
     const payload = await getJson(
       `/api/modules/${encodeURIComponent(moduleId)}/questions/${encodeURIComponent(question.id)}`,
       {
         method: "PUT",
-        body: JSON.stringify({ answer }),
+        body: JSON.stringify({
+          options,
+          answer,
+          explanation,
+        }),
         headers: { "Content-Type": "application/json" },
       },
     );
@@ -626,8 +759,10 @@ async function saveAnswerCorrection(question) {
     state.practice.correction = null;
     if (state.practice.mode === "questions") {
       if (selectedAnswer.length) {
-        state.practice.submitted[question.id] = selectedAnswer.slice().sort().join("|")
+        const corrected = selectedAnswer.slice().sort().join("|")
           === updatedQuestion.answer.slice().sort().join("|");
+        state.practice.submitted[question.id] = corrected;
+        await savePracticeProgress(question, selectedAnswer, corrected, elapsed, moduleId);
       } else {
         delete state.practice.submitted[question.id];
       }
@@ -638,7 +773,10 @@ async function saveAnswerCorrection(question) {
       renderPracticeQuestion();
       renderPracticeIndex();
     }
-    showToast(`答案已勘误为 ${updatedQuestion.answer.join("、")}，并已保存到题库`);
+    const answerLabel = updatedQuestion.answer?.length
+      ? `答案 ${updatedQuestion.answer.join("、")}`
+      : "暂未标记正确答案";
+    showToast(`选项、${answerLabel}和解析已保存到题库`);
   } catch (error) {
     showToast(error.message, "error");
   }
@@ -688,6 +826,7 @@ function renderPracticeQuestion() {
       ${answerCorrectionMarkup(question)}
     `;
     bindAnswerCorrection(question);
+    bindCategoryEditor("manual-mark");
     $("#manual-save-wrong").addEventListener("click", () => saveWrongBookEntry(question, {
       category: readCategory("manual-mark"),
       manualAnswer: state.practice.answers[question.id] || [],
@@ -700,26 +839,31 @@ function renderPracticeQuestion() {
     return;
   }
 
-  feedback.hidden = !submitted;
+  const historyMarkup = practiceHistoryMarkup(question);
+  feedback.hidden = !submitted && !historyMarkup;
   if (submitted) {
     const correct = state.practice.submitted[question.id];
     feedback.className = `practice-feedback ${correct ? "" : "wrong"}`;
     feedback.innerHTML = `
       <strong>${correct ? "回答正确" : "回答不正确"} · 正确答案：${escapeHtml(question.answer.join("、"))}</strong>
-      <div>${escapeHtml(question.explanation || "暂无解析")}</div>
-      ${correct ? "" : categoryEditor("wrong-mark", "自动错题")}
+      <div class="practice-explanation">${escapeHtml(question.explanation || "暂无解析")}</div>
+      ${categoryEditor("wrong-mark", correct ? "未分类" : "自动错题")}
       <div class="feedback-actions">
         <button id="answer-correction-button" class="button button-quiet" type="button">勘误答案 <span>✎</span></button>
-        ${correct ? "" : `<button id="wrong-book-button" class="button button-quiet">${isInWrongBook(state.selectedModule.id, question.id) ? "更新错题本" : "加入错题本"} <span>＋</span></button>`}
+        <button id="wrong-book-button" class="button button-quiet">${isInWrongBook(state.selectedModule.id, question.id) ? "更新错题本" : "加入错题本"} <span>＋</span></button>
       </div>
       ${answerCorrectionMarkup(question)}
     `;
     bindAnswerCorrection(question);
-    $("#wrong-book-button")?.addEventListener("click", () => saveWrongBookEntry(question, {
+    bindCategoryEditor("wrong-mark");
+    $("#wrong-book-button").addEventListener("click", () => saveWrongBookEntry(question, {
       category: readCategory("wrong-mark"),
       manualAnswer: state.practice.answers[question.id] || [],
-      note: "答题错误",
+      note: correct ? "答题正确，手动加入错题本" : "答题错误",
     }));
+  } else if (historyMarkup) {
+    feedback.className = "practice-feedback history";
+    feedback.innerHTML = historyMarkup;
   }
   renderMultipleChoiceSubmit(question, submitted);
   $("#practice-next").hidden = !submitted;
@@ -796,11 +940,13 @@ function renderWrongBookPracticeQuestion() {
     : entry.manualAnswer?.length
       ? `人工标记：${escapeHtml(entry.manualAnswer.join("、"))}`
       : "暂无标准答案";
+  const historyMarkup = practiceHistoryMarkup(question, entry.moduleId);
   $("#practice-feedback").hidden = false;
   $("#practice-feedback").className = "practice-feedback manual";
   $("#practice-feedback").innerHTML = `
     <strong>${answerText}</strong>
-    <div>${escapeHtml(question.explanation || entry.note || "这道题需要人工复盘。")}</div>
+    <div class="practice-explanation">${escapeHtml(question.explanation || entry.note || "这道题需要人工复盘。")}</div>
+    ${historyMarkup ? `<div class="practice-history-inline">${historyMarkup}</div>` : ""}
     <div class="feedback-actions">
       <button id="answer-correction-button" class="button button-quiet" type="button">勘误答案 <span>✎</span></button>
       <button id="wrong-book-forgot" class="button button-quiet">还不会，后面再来 <span>↻</span></button>
@@ -809,6 +955,7 @@ function renderWrongBookPracticeQuestion() {
     ${answerCorrectionMarkup(question)}
   `;
   bindAnswerCorrection(question);
+  bindCategoryEditor("wrong-book-practice");
   $("#wrong-book-forgot").addEventListener("click", forgetWrongBookQuestion);
   $("#wrong-book-remember").addEventListener("click", rememberWrongBookQuestion);
   renderPracticeIndex();
@@ -829,7 +976,23 @@ function toggleOption(key) {
   submitAnswer();
 }
 
-function submitAnswer() {
+async function savePracticeProgress(question, selectedAnswer, correct, elapsed, moduleId = state.selectedModule?.id) {
+  if (!moduleId || !question?.id) return;
+  const payload = await getJson("/api/practice-progress", {
+    method: "PUT",
+    body: JSON.stringify({
+      moduleId,
+      questionId: question.id,
+      lastAnswer: selectedAnswer,
+      lastCorrect: correct,
+      lastElapsedSeconds: elapsed,
+    }),
+    headers: { "Content-Type": "application/json" },
+  });
+  state.practiceProgress[payload.key] = payload.progress;
+}
+
+async function submitAnswer() {
   if (state.practice.mode !== "questions") return;
   const question = currentQuestion();
   const selected = state.practice.answers[question.id] || [];
@@ -841,8 +1004,20 @@ function submitAnswer() {
     renderPracticeQuestion();
     return;
   }
-  state.practice.submitted[question.id] = answerKey(question) === [...question.answer].sort().join("|");
+  const elapsed = currentTimerSeconds();
+  const correct = answerKey(question) === [...question.answer].sort().join("|");
+  state.practice.submitted[question.id] = correct;
   finishQuestionTimer();
+  try {
+    await savePracticeProgress(
+      question,
+      [...selected],
+      correct,
+      elapsed,
+    );
+  } catch (error) {
+    showToast(`本次作答已判题，但历史记录保存失败：${error.message}`, "error");
+  }
   renderPracticeQuestion();
   renderPracticeIndex();
 }
@@ -867,7 +1042,11 @@ function rememberWrongBookQuestion() {
   const entry = currentWrongBookEntry();
   if (!entry) return;
   const key = wrongBookKey(entry);
+  const elapsed = currentTimerSeconds();
+  const selected = [...(state.practice.answers[entry.question.id] || [])];
   finishQuestionTimer();
+  savePracticeProgress(entry.question, selected, null, elapsed, entry.moduleId)
+    .catch((error) => showToast(`错题复习记录保存失败：${error.message}`, "error"));
   state.practice.wrongBookRemembered[key] = true;
   state.practice.wrongBookQueue = state.practice.wrongBookQueue.filter((item) => item !== key);
   renderWrongBookPracticeQuestion();
@@ -877,6 +1056,10 @@ function forgetWrongBookQuestion() {
   const entry = currentWrongBookEntry();
   if (!entry) return;
   const key = wrongBookKey(entry);
+  const elapsed = currentTimerSeconds();
+  const selected = [...(state.practice.answers[entry.question.id] || [])];
+  savePracticeProgress(entry.question, selected, null, elapsed, entry.moduleId)
+    .catch((error) => showToast(`错题复习记录保存失败：${error.message}`, "error"));
   state.practice.wrongBookQueue.shift();
   state.practice.wrongBookQueue.push(key);
   renderWrongBookPracticeQuestion();
@@ -933,6 +1116,7 @@ function renderWrongBook() {
                 <option value="__new__">新分类...</option>
               </select>
               <input class="compact-input wrong-book-new-category" data-module-id="${entry.moduleId}" data-question-id="${entry.question.id}" type="text" placeholder="输入新分类后回车" />
+              <button class="button button-quiet save-wrong-book-category" data-module-id="${entry.moduleId}" data-question-id="${entry.question.id}" type="button">保存分类</button>
             </div>
           </div>
           <div class="question-preview-meta">
@@ -962,8 +1146,30 @@ function bindWrongBookControls() {
   });
   $$(".wrong-book-category").forEach((select) => {
     select.addEventListener("change", async () => {
+      const input = select.parentElement.querySelector(".wrong-book-new-category");
+      if (input) {
+        input.hidden = select.value !== "__new__";
+        if (select.value === "__new__") input.focus();
+      }
       if (select.value === "__new__") return;
       await updateWrongBookCategory(select.dataset.moduleId, select.dataset.questionId, select.value);
+    });
+  });
+  $$(".wrong-book-new-category").forEach((input) => {
+    input.hidden = input.closest(".wrong-book-controls")?.querySelector(".wrong-book-category")?.value !== "__new__";
+  });
+  $$(".save-wrong-book-category").forEach((button) => {
+    button.addEventListener("click", async () => {
+      const controls = button.closest(".wrong-book-controls");
+      const select = controls?.querySelector(".wrong-book-category");
+      const input = controls?.querySelector(".wrong-book-new-category");
+      const category = select?.value === "__new__" ? input?.value.trim() : select?.value;
+      if (!category) {
+        showToast("请输入新分类名称", "error");
+        input?.focus();
+        return;
+      }
+      await updateWrongBookCategory(button.dataset.moduleId, button.dataset.questionId, category);
     });
   });
   $$(".wrong-book-new-category").forEach((input) => {
