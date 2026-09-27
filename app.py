@@ -34,41 +34,42 @@ MEDIA_DIR = UPLOAD_DIR / "images"
 SUPPORTED_EXTENSIONS = {".pdf", ".docx", ".txt", ".md", ".pptx"}
 LEADING_MARKERS = r"[▲△◆◇★☆●○■□▶▷▸▹►▻]+"
 QUESTION_START = re.compile(
-    rf"^\s*(?:{LEADING_MARKERS}\s*)*(?:第\s*)?(\d{{1,4}})\s*[\.．、\)）:：]"
-    rf"(?:\s+(.+)|([^\d\s].*))$"
+    rf"^\s*(?:{LEADING_MARKERS}\s*)*(?:第\s*)?(\d{{1,4}})\s*[\.．、\)）:：]\s*(.*)$"
 )
 OPTION_START = re.compile(rf"^\s*(?:{LEADING_MARKERS}\s*)*([A-Fa-f])\s*[\.．、\)）:：]\s*(.*)$")
 INLINE_OPTION_START = re.compile(rf"(?<![A-Za-z])(?:{LEADING_MARKERS}\s*)*([A-Fa-f])\s*[\.．:：]\s*")
 EMBEDDED_QUESTION_START = re.compile(
-    rf"(?<!\d)((?:{LEADING_MARKERS}\s*)*\d{{1,4}}\s*[\.．、\)）:：]"
-    rf"\s+(?=\S)(?=\D))"
+    rf"(?<!\d)((?:{LEADING_MARKERS}\s*)*\d{{1,4}}\s*[\.．、\)）:：]\s+(?=\D))"
 )
 MARKER_ONLY_LINE = re.compile(rf"^\s*(?:{LEADING_MARKERS}\s*)+$")
 TRAILING_MARKERS = re.compile(rf"(?:\s*{LEADING_MARKERS})+\s*$")
 ANSWER_LINE = re.compile(
-    r"^\s*(?:\d{1,4}\s*[\.．、\)）]\s*)?(?:参考)?(?:【\s*)?答案(?:\s*】)?(?:为|是)?\s*[:：]?\s*(.+?)\s*$",
+    r"^\s*(?:\d{1,4}\s*[\.．、\)）]\s*)?(?:参考)?(?:【\s*)?答案(?:\s*】)?(?:为|是)?\s*[:：。．.!！]?\s*(.+?)\s*$",
     re.IGNORECASE,
 )
 EXPLANATION_LINE = re.compile(
-    r"^\s*(?:\d{1,4}\s*[\.．、\)）]\s*)?(?:答案)?(?:【\s*)?解析(?:\s*】)?\s*[:：]?\s*(.*)$",
+    r"^\s*(?:\d{1,4}\s*[\.．、\)）]\s*)?(?:答案)?(?:【\s*)?解析(?:\s*】)?\s*[:：。．.!！]?\s*(.*)$",
     re.IGNORECASE,
 )
 ANSWER_SECTION_MARKER = re.compile(r"(?:答案与解析|答案解析|参考答案)", re.IGNORECASE)
 ANSWER_ITEM_LINE = re.compile(
-    rf"^\s*(?:{LEADING_MARKERS}\s*)*(\d{{1,4}})\s*[\.．、\)）:：]?\s*"
+    r"^\s*(\d{1,4})\s*[\.．、\)）:：]?\s*"
     r"(?:参考)?(?:【\s*)?答案(?:\s*】)?(?:为|是)?\s*[:：。．.!！]?\s*"
-    r"([A-Fa-f]{1,6}|正确|错误|对|错)\s*[。．.!！]?\s*$",
+    r"([A-Fa-f]{1,6}|正确|错误|对|错)\s*$",
     re.IGNORECASE,
 )
 ANSWER_KEY_ITEM = re.compile(
-    rf"(?<!\d)(?:{LEADING_MARKERS}\s*)*(\d{{1,4}})\s*[\.．、\)）:：]?\s*"
-    r"(?:参考)?(?:【\s*)?答案(?:\s*】)?(?:为|是)?\s*[:：]?\s*"
+    r"(?<!\d)(\d{1,4})\s*[\.．、\)）:：]?\s*"
+    r"(?:参考)?(?:【\s*)?答案(?:\s*】)?(?:为|是)?\s*[:：。．.!！]?\s*"
     r"([A-Fa-f]{1,6}|正确|错误|对|错)(?=\s|$|[,，;；])",
     re.IGNORECASE,
 )
 PLAIN_ANSWER_KEY_ITEM = re.compile(
-    rf"(?<!\d)(?:{LEADING_MARKERS}\s*)*(\d{{1,4}})\s*[\.．、\)）:：]?\s*"
-    r"([A-Fa-f]{1,6}|正确|错误|对|错)(?=\s|$|[,，;；])",
+    r"(?<!\d)(\d{1,4})\s*[\.．、\)）:：]?\s*([A-Fa-f]{1,6}|正确|错误|对|错)(?=\s|$|[,，;；])",
+    re.IGNORECASE,
+)
+ANSWER_ENTRY_START = re.compile(
+    r"^\s*(\d{1,4})\s*[\.．、\)）:：]?\s*(?:参考)?(?:【\s*)?答案\b",
     re.IGNORECASE,
 )
 SECTION_HEADING = re.compile(
@@ -489,8 +490,8 @@ def question_type(question_text: str, answer: list[str], options: list[dict[str,
     return "单选题"
 
 
-def question_stem(match: re.Match[str]) -> str:
-    return (match.group(2) or match.group(3) or "").strip()
+def is_question_start(line: str) -> bool:
+    return bool(QUESTION_START.match(line)) and not ANSWER_LINE.match(line) and not EXPLANATION_LINE.match(line)
 
 
 def normalize_section(value: str) -> str:
@@ -513,10 +514,6 @@ def section_heading(line: str) -> str | None:
     return normalize_section(match.group(1)) if match else None
 
 
-def is_question_start(line: str) -> bool:
-    return bool(QUESTION_START.match(line)) and not ANSWER_LINE.match(line) and not EXPLANATION_LINE.match(line)
-
-
 def split_embedded_question_lines(lines: list[str]) -> list[str]:
     result: list[str] = []
     for line in lines:
@@ -535,7 +532,7 @@ def split_embedded_question_lines(lines: list[str]) -> list[str]:
 
 
 def extract_answer_records(lines: list[str]) -> list[AnswerRecord]:
-    """Read answer records without letting the next question leak into an explanation."""
+    """Read answer records while preserving repeated question-number sections."""
     records: list[AnswerRecord] = []
     current: AnswerRecord | None = None
     explanation_lines: list[str] = []
@@ -566,12 +563,21 @@ def extract_answer_records(lines: list[str]) -> list[AnswerRecord]:
             )
             continue
 
+        # Even an unrecognized answer value marks the next question boundary.
+        if ANSWER_ENTRY_START.match(line):
+            flush()
+            continue
+
         explanation_line = EXPLANATION_LINE.match(line)
         if explanation_line:
             number_match = re.match(r"^\s*(\d{1,4})\s*[\.．、\)）:：]", line)
-            if number_match and (current is None or current.number != number_match.group(1)):
+            if number_match:
                 flush()
-                current = AnswerRecord(number=number_match.group(1), answer=[], section=current_section)
+                current = AnswerRecord(
+                    number=number_match.group(1),
+                    answer=[],
+                    section=current_section,
+                )
             explanation_text = explanation_line.group(1).strip()
             if current is not None and explanation_text:
                 explanation_lines.append(explanation_text)
@@ -592,8 +598,6 @@ def extract_answer_records(lines: list[str]) -> list[AnswerRecord]:
                 )
             continue
 
-        # A question-looking line starts a new boundary even when that question
-        # has no answer entry in the answer document.
         if is_question_start(line):
             flush()
             continue
@@ -623,22 +627,28 @@ class AnswerRecordMatcher:
         self.used: set[int] = set()
 
     def take(self, number: str, section: str | None) -> AnswerRecord | None:
-        candidates: list[int] = []
-        for index, record in enumerate(self.records):
-            if index in self.used or record.number != number:
-                continue
-            if section and record.section == section:
-                candidates.append(index)
+        candidates = [
+            index
+            for index, record in enumerate(self.records)
+            if index not in self.used
+            and record.number == number
+            and section
+            and record.section == section
+        ]
         if not candidates:
-            for index, record in enumerate(self.records):
-                if index in self.used or record.number != number:
-                    continue
-                if record.section is None or section is None:
-                    candidates.append(index)
+            candidates = [
+                index
+                for index, record in enumerate(self.records)
+                if index not in self.used
+                and record.number == number
+                and (record.section is None or section is None)
+            ]
         if not candidates:
-            for index, record in enumerate(self.records):
-                if index not in self.used and record.number == number:
-                    candidates.append(index)
+            candidates = [
+                index
+                for index, record in enumerate(self.records)
+                if index not in self.used and record.number == number
+            ]
         if not candidates:
             return None
         selected = candidates[0]
@@ -676,12 +686,23 @@ def parse_questions(
         else:
             external_answers, external_explanations = external_answer_data
             external_records = [
-                AnswerRecord(number=number, answer=answer, explanation=external_explanations.get(number, ""))
+                AnswerRecord(
+                    number=number,
+                    answer=answer,
+                    explanation=external_explanations.get(number, ""),
+                )
                 for number, answer in external_answers.items()
             ]
         answer_map.update(external_answers)
         explanation_map.update(external_explanations)
     answer_matcher = AnswerRecordMatcher([external_records, embedded_records])
+
+    first_question_index = next(
+        (index for index, line in enumerate(question_lines) if is_question_start(line)),
+        None,
+    )
+    if first_question_index is not None:
+        question_lines = question_lines[first_question_index:]
 
     has_question_starts = any(is_question_start(line) for line in question_lines)
     if not has_question_starts:
@@ -701,7 +722,6 @@ def parse_questions(
     blocks: list[tuple[list[str], str | None]] = []
     current: list[str] = []
     current_section: str | None = None
-    seen_question = False
     for line in question_lines:
         heading = section_heading(line)
         if heading:
@@ -713,14 +733,11 @@ def parse_questions(
         if is_question_start(line) and current:
             blocks.append((current, current_section))
             current = [line]
-            seen_question = True
         elif is_question_start(line):
             current = [line]
-            seen_question = True
-        elif seen_question:
-            current.append(line)
         else:
-            continue
+            if current:
+                current.append(line)
     if current:
         blocks.append((current, current_section))
 
@@ -731,7 +748,7 @@ def parse_questions(
             continue
         start_match = QUESTION_START.match(block[0])
         number = start_match.group(1) if start_match else str(index)
-        raw_stem_source = question_stem(start_match) if start_match else block[0]
+        raw_stem_source = start_match.group(2).strip() if start_match else block[0]
         question_images: list[str] = []
         for image_url in IMAGE_MARKER.findall(raw_stem_source):
             if image_url not in question_images:
