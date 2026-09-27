@@ -3,6 +3,8 @@ from __future__ import annotations
 import os
 import subprocess
 import time
+import urllib.error
+import urllib.request
 import venv
 import webbrowser
 from pathlib import Path
@@ -45,10 +47,26 @@ def install_dependencies(python_path: Path) -> None:
         str(python_path),
         "-m",
         "pip",
+        "--disable-pip-version-check",
         "install",
         "-r",
         str(REQUIREMENTS_PATH),
     ])
+
+
+def wait_for_server(process: subprocess.Popen[bytes], timeout: float = 30.0) -> None:
+    deadline = time.monotonic() + timeout
+    last_error: Exception | None = None
+    while time.monotonic() < deadline:
+        if process.poll() is not None:
+            raise RuntimeError("后端服务启动失败，请查看上方错误信息。")
+        try:
+            with urllib.request.urlopen(URL, timeout=0.5):
+                return
+        except (urllib.error.URLError, TimeoutError, OSError) as exc:
+            last_error = exc
+            time.sleep(0.25)
+    raise RuntimeError(f"后端服务未能在 {timeout:.0f} 秒内就绪：{last_error}")
 
 
 def main() -> None:
@@ -57,14 +75,20 @@ def main() -> None:
 
     print("后端服务启动中 ...")
     process = subprocess.Popen([str(python_path), str(APP_PATH)], cwd=ROOT)
-    time.sleep(0.8)
-    print(f"正在打开网页：{URL}")
-    webbrowser.open(URL)
     try:
+        wait_for_server(process)
+        print(f"正在打开网页：{URL}")
+        webbrowser.open(URL)
         process.wait()
-    except KeyboardInterrupt:
-        process.terminate()
-        process.wait()
+    except (KeyboardInterrupt, RuntimeError):
+        if process.poll() is None:
+            process.terminate()
+            try:
+                process.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                process.wait()
+        raise
 
 
 if __name__ == "__main__":

@@ -8,6 +8,7 @@ import re
 import unicodedata
 import uuid
 import zipfile
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from email.header import decode_header
 from email import policy
@@ -31,11 +32,19 @@ DB_PATH = DATA_DIR / "question_bank.json"
 MEDIA_DIR = UPLOAD_DIR / "images"
 
 SUPPORTED_EXTENSIONS = {".pdf", ".docx", ".txt", ".md", ".pptx"}
+LEADING_MARKERS = r"[▲△◆◇★☆●○■□▶▷▸▹►▻]+"
 QUESTION_START = re.compile(
-    r"^\s*(?:第\s*)?(\d{1,4})\s*[\.．、\)）:：]\s*(.*)$"
+    rf"^\s*(?:{LEADING_MARKERS}\s*)*(?:第\s*)?(\d{{1,4}})\s*[\.．、\)）:：]"
+    rf"(?:\s+(.+)|([^\d\s].*))$"
 )
-OPTION_START = re.compile(r"^\s*([A-Fa-f])\s*[\.．、\)）:：]\s*(.*)$")
-INLINE_OPTION_START = re.compile(r"(?<![A-Za-z])([A-Fa-f])\s*[\.．、\)）:：]\s*")
+OPTION_START = re.compile(rf"^\s*(?:{LEADING_MARKERS}\s*)*([A-Fa-f])\s*[\.．、\)）:：]\s*(.*)$")
+INLINE_OPTION_START = re.compile(rf"(?<![A-Za-z])(?:{LEADING_MARKERS}\s*)*([A-Fa-f])\s*[\.．:：]\s*")
+EMBEDDED_QUESTION_START = re.compile(
+    rf"(?<!\d)((?:{LEADING_MARKERS}\s*)*\d{{1,4}}\s*[\.．、\)）:：]"
+    rf"\s+(?=\S)(?=\D))"
+)
+MARKER_ONLY_LINE = re.compile(rf"^\s*(?:{LEADING_MARKERS}\s*)+$")
+TRAILING_MARKERS = re.compile(rf"(?:\s*{LEADING_MARKERS})+\s*$")
 ANSWER_LINE = re.compile(
     r"^\s*(?:\d{1,4}\s*[\.．、\)）]\s*)?(?:参考)?(?:【\s*)?答案(?:\s*】)?(?:为|是)?\s*[:：]?\s*(.+?)\s*$",
     re.IGNORECASE,
@@ -46,21 +55,54 @@ EXPLANATION_LINE = re.compile(
 )
 ANSWER_SECTION_MARKER = re.compile(r"(?:答案与解析|答案解析|参考答案)", re.IGNORECASE)
 ANSWER_ITEM_LINE = re.compile(
-    r"^\s*(\d{1,4})\s*[\.．、\)）:：]?\s*"
-    r"(?:参考)?(?:【\s*)?答案(?:\s*】)?(?:为|是)?\s*[:：]?\s*"
-    r"([A-Fa-f]{1,6}|正确|错误|对|错)\s*$",
+    rf"^\s*(?:{LEADING_MARKERS}\s*)*(\d{{1,4}})\s*[\.．、\)）:：]?\s*"
+    r"(?:参考)?(?:【\s*)?答案(?:\s*】)?(?:为|是)?\s*[:：。．.!！]?\s*"
+    r"([A-Fa-f]{1,6}|正确|错误|对|错)\s*[。．.!！]?\s*$",
     re.IGNORECASE,
 )
 ANSWER_KEY_ITEM = re.compile(
-    r"(?<!\d)(\d{1,4})\s*[\.．、\)）:：]?\s*"
+    rf"(?<!\d)(?:{LEADING_MARKERS}\s*)*(\d{{1,4}})\s*[\.．、\)）:：]?\s*"
     r"(?:参考)?(?:【\s*)?答案(?:\s*】)?(?:为|是)?\s*[:：]?\s*"
     r"([A-Fa-f]{1,6}|正确|错误|对|错)(?=\s|$|[,，;；])",
     re.IGNORECASE,
 )
 PLAIN_ANSWER_KEY_ITEM = re.compile(
-    r"(?<!\d)(\d{1,4})\s*[\.．、\)）:：]?\s*([A-Fa-f]{1,6}|正确|错误|对|错)(?=\s|$|[,，;；])",
+    rf"(?<!\d)(?:{LEADING_MARKERS}\s*)*(\d{{1,4}})\s*[\.．、\)）:：]?\s*"
+    r"([A-Fa-f]{1,6}|正确|错误|对|错)(?=\s|$|[,，;；])",
     re.IGNORECASE,
 )
+SECTION_HEADING = re.compile(
+    r"^\s*(?:[一二三四五六七八九十百千万\d]+[、.．:：)\]]\s*)?"
+    r"(单项选择题|单选题|多项选择题|多选题|判断题|填空题|简答题|选择题)"
+    r"(?:\s*[\(（].*[\)）])?\s*$",
+    re.IGNORECASE,
+)
+
+
+@dataclass
+class AnswerRecord:
+    number: str
+    answer: list[str]
+    explanation: str = ""
+    section: str | None = None
+
+
+@dataclass
+class PreparedAnswerData:
+    answers: dict[str, list[str]]
+    explanations: dict[str, str]
+    records: list[AnswerRecord]
+
+    def __iter__(self):
+        yield self.answers
+        yield self.explanations
+
+    def __getitem__(self, index: int):
+        if index == 0:
+            return self.answers
+        if index == 1:
+            return self.explanations
+        raise IndexError(index)
 
 
 def utc_now() -> str:
@@ -342,9 +384,10 @@ def answer_file_score(filename: str, raw_text: str) -> int:
     return score
 
 
-def prepare_answer_data(raw_text: str) -> tuple[dict[str, list[str]], dict[str, str]]:
+def prepare_answer_data(raw_text: str) -> PreparedAnswerData:
     lines = [line.strip() for line in raw_text.replace("\r\n", "\n").split("\n") if line.strip()]
-    return extract_answer_data(lines)
+    answers, explanations = extract_answer_data(lines)
+    return PreparedAnswerData(answers, explanations, extract_answer_records(lines))
 
 
 def classify_uploads(
@@ -394,48 +437,39 @@ def clean_answer(value: str) -> list[str]:
 
 
 def normalize_manual_answer(value: Any, options: list[dict[str, str]]) -> list[str]:
-    """Normalize a manually selected answer and reject keys outside the question."""
+    """Normalize manually entered answers without rejecting free-form corrections."""
     raw_values = value if isinstance(value, list) else [value]
-    if options:
-        allowed = {
-            str(option.get("key", "")).strip().upper()
-            for option in options
-            if str(option.get("key", "")).strip()
-        }
-        answer: list[str] = []
-        for raw in raw_values:
-            for item in clean_answer(str(raw)):
-                candidate = item.upper() if len(item) == 1 else item
-                if candidate not in allowed:
-                    raise ValueError(f"答案「{candidate}」不在本题选项中")
-                if candidate not in answer:
-                    answer.append(candidate)
-        return sorted(answer)
-
-    answer = []
+    answer: list[str] = []
     for raw in raw_values:
         text = unicodedata.normalize("NFKC", str(raw or "")).strip()
-        if text and text not in answer:
-            answer.append(text)
+        if not text:
+            continue
+        items = clean_answer(text) if len(text) <= 12 else [text]
+        for item in items:
+            candidate = item.upper() if len(item) == 1 and item.isalpha() else item
+            if candidate and candidate not in answer:
+                answer.append(candidate)
     return answer
 
 
 def normalize_manual_options(value: Any) -> list[dict[str, str]]:
-    """Validate and normalize options edited in the manual correction panel."""
+    """Normalize edited options; incomplete blank rows are ignored."""
     if not isinstance(value, list):
-        raise ValueError("题目选项格式无效")
+        return []
     options: list[dict[str, str]] = []
     seen: set[str] = set()
     for raw_option in value:
         if not isinstance(raw_option, dict):
-            raise ValueError("题目选项格式无效")
+            continue
         raw_key = unicodedata.normalize("NFKC", str(raw_option.get("key") or "")).strip()
         text = unicodedata.normalize("NFKC", str(raw_option.get("text") or "")).strip()
-        if not raw_key or not text:
-            raise ValueError("每个选项都需要填写选项标记和内容")
+        if not raw_key and not text:
+            continue
         key = raw_key.upper() if len(raw_key) == 1 and raw_key.isalpha() else raw_key
+        if not key:
+            key = chr(ord("A") + len(options)) if len(options) < 26 else str(len(options) + 1)
         if key in seen:
-            raise ValueError(f"选项标记「{key}」重复")
+            continue
         seen.add(key)
         options.append({"key": key, "text": text})
     return options
@@ -455,64 +489,171 @@ def question_type(question_text: str, answer: list[str], options: list[dict[str,
     return "单选题"
 
 
+def question_stem(match: re.Match[str]) -> str:
+    return (match.group(2) or match.group(3) or "").strip()
+
+
+def normalize_section(value: str) -> str:
+    normalized = re.sub(r"\s+", "", value).casefold()
+    if "多选" in normalized or "多项选择" in normalized:
+        return "多选题"
+    if "单选" in normalized or "单项选择" in normalized:
+        return "单选题"
+    if "判断" in normalized:
+        return "判断题"
+    if "填空" in normalized:
+        return "填空题"
+    if "简答" in normalized:
+        return "简答题"
+    return "选择题"
+
+
+def section_heading(line: str) -> str | None:
+    match = SECTION_HEADING.match(line)
+    return normalize_section(match.group(1)) if match else None
+
+
 def is_question_start(line: str) -> bool:
     return bool(QUESTION_START.match(line)) and not ANSWER_LINE.match(line) and not EXPLANATION_LINE.match(line)
 
 
-def extract_answer_data(lines: list[str]) -> tuple[dict[str, list[str]], dict[str, str]]:
-    """Read a concentrated answer key and optional per-question explanations."""
-    answers: dict[str, list[str]] = {}
-    explanations: dict[str, list[str]] = {}
-    current_number: str | None = None
+def split_embedded_question_lines(lines: list[str]) -> list[str]:
+    result: list[str] = []
+    for line in lines:
+        remainder = line
+        while True:
+            match = EMBEDDED_QUESTION_START.search(remainder, 1)
+            if not match:
+                break
+            prefix = remainder[:match.start()].strip()
+            if prefix:
+                result.append(prefix)
+            remainder = remainder[match.start():].strip()
+        if remainder.strip():
+            result.append(remainder.strip())
+    return result
+
+
+def extract_answer_records(lines: list[str]) -> list[AnswerRecord]:
+    """Read answer records without letting the next question leak into an explanation."""
+    records: list[AnswerRecord] = []
+    current: AnswerRecord | None = None
+    explanation_lines: list[str] = []
+    current_section: str | None = None
+
+    def flush() -> None:
+        nonlocal current, explanation_lines
+        if current is not None:
+            current.explanation = " ".join(explanation_lines).strip()
+            records.append(current)
+        current = None
+        explanation_lines = []
 
     for line in lines:
+        heading = section_heading(line)
+        if heading:
+            flush()
+            current_section = heading
+            continue
+
         item_line = ANSWER_ITEM_LINE.match(line)
         if item_line:
-            number = item_line.group(1)
-            answers[number] = clean_answer(item_line.group(2))
-            explanations.setdefault(number, [])
-            current_number = number
+            flush()
+            current = AnswerRecord(
+                number=item_line.group(1),
+                answer=clean_answer(item_line.group(2)),
+                section=current_section,
+            )
             continue
 
         explanation_line = EXPLANATION_LINE.match(line)
         if explanation_line:
             number_match = re.match(r"^\s*(\d{1,4})\s*[\.．、\)）:：]", line)
-            if number_match:
-                current_number = number_match.group(1)
-                explanations.setdefault(current_number, [])
+            if number_match and (current is None or current.number != number_match.group(1)):
+                flush()
+                current = AnswerRecord(number=number_match.group(1), answer=[], section=current_section)
             explanation_text = explanation_line.group(1).strip()
-            if current_number and explanation_text:
-                explanations.setdefault(current_number, []).append(explanation_text)
+            if current is not None and explanation_text:
+                explanation_lines.append(explanation_text)
             continue
 
         key_matches = list(ANSWER_KEY_ITEM.finditer(line))
         if not key_matches:
             key_matches = list(PLAIN_ANSWER_KEY_ITEM.finditer(line))
         if key_matches:
+            flush()
             for match in key_matches:
-                number = match.group(1)
-                answers[number] = clean_answer(match.group(2))
-            current_number = None
+                records.append(
+                    AnswerRecord(
+                        number=match.group(1),
+                        answer=clean_answer(match.group(2)),
+                        section=current_section,
+                    )
+                )
             continue
 
-        if current_number and line.strip() and not ANSWER_SECTION_MARKER.search(line):
-            explanations.setdefault(current_number, []).append(line.strip())
+        # A question-looking line starts a new boundary even when that question
+        # has no answer entry in the answer document.
+        if is_question_start(line):
+            flush()
+            continue
 
-    return answers, {
-        number: " ".join(items).strip()
-        for number, items in explanations.items()
-        if items
+        if current is not None and line.strip() and not ANSWER_SECTION_MARKER.search(line):
+            explanation_lines.append(line.strip())
+
+    flush()
+    return records
+
+
+def extract_answer_data(lines: list[str]) -> tuple[dict[str, list[str]], dict[str, str]]:
+    """Read a concentrated answer key and optional per-question explanations."""
+    records = extract_answer_records(lines)
+    answers = {record.number: record.answer for record in records}
+    explanations = {
+        record.number: record.explanation
+        for record in records
+        if record.explanation
     }
+    return answers, explanations
+
+
+class AnswerRecordMatcher:
+    def __init__(self, sources: list[list[AnswerRecord]]) -> None:
+        self.records = [record for source in sources for record in source]
+        self.used: set[int] = set()
+
+    def take(self, number: str, section: str | None) -> AnswerRecord | None:
+        candidates: list[int] = []
+        for index, record in enumerate(self.records):
+            if index in self.used or record.number != number:
+                continue
+            if section and record.section == section:
+                candidates.append(index)
+        if not candidates:
+            for index, record in enumerate(self.records):
+                if index in self.used or record.number != number:
+                    continue
+                if record.section is None or section is None:
+                    candidates.append(index)
+        if not candidates:
+            for index, record in enumerate(self.records):
+                if index not in self.used and record.number == number:
+                    candidates.append(index)
+        if not candidates:
+            return None
+        selected = candidates[0]
+        self.used.add(selected)
+        return self.records[selected]
 
 
 def parse_questions(
     raw_text: str,
-    external_answer_data: tuple[dict[str, list[str]], dict[str, str]] | None = None,
+    external_answer_data: PreparedAnswerData | tuple[dict[str, list[str]], dict[str, str]] | None = None,
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     text = raw_text.replace("\r\n", "\n").replace("\r", "\n")
     text = re.sub(r"[ \t]+\n", "\n", text)
     lines = [line.strip() for line in text.split("\n")]
-    lines = [line for line in lines if line]
+    lines = [line for line in lines if line and not MARKER_ONLY_LINE.match(line)]
 
     answer_section_index = next(
         (
@@ -522,20 +663,25 @@ def parse_questions(
         ),
         len(lines),
     )
-    question_lines = lines[:answer_section_index]
+    question_lines = split_embedded_question_lines(lines[:answer_section_index])
     answer_lines = lines[answer_section_index:]
+    embedded_records = extract_answer_records(answer_lines)
     answer_map, explanation_map = extract_answer_data(answer_lines)
+    external_records: list[AnswerRecord] = []
     if external_answer_data:
-        external_answers, external_explanations = external_answer_data
+        if isinstance(external_answer_data, PreparedAnswerData):
+            external_answers = external_answer_data.answers
+            external_explanations = external_answer_data.explanations
+            external_records = external_answer_data.records
+        else:
+            external_answers, external_explanations = external_answer_data
+            external_records = [
+                AnswerRecord(number=number, answer=answer, explanation=external_explanations.get(number, ""))
+                for number, answer in external_answers.items()
+            ]
         answer_map.update(external_answers)
         explanation_map.update(external_explanations)
-
-    first_question_index = next(
-        (index for index, line in enumerate(question_lines) if is_question_start(line)),
-        None,
-    )
-    if first_question_index is not None:
-        question_lines = question_lines[first_question_index:]
+    answer_matcher = AnswerRecordMatcher([external_records, embedded_records])
 
     has_question_starts = any(is_question_start(line) for line in question_lines)
     if not has_question_starts:
@@ -552,25 +698,40 @@ def parse_questions(
             "knowledgePoints": knowledge_points,
         }
 
-    blocks: list[list[str]] = []
+    blocks: list[tuple[list[str], str | None]] = []
     current: list[str] = []
+    current_section: str | None = None
+    seen_question = False
     for line in question_lines:
+        heading = section_heading(line)
+        if heading:
+            if current:
+                blocks.append((current, current_section))
+                current = []
+            current_section = heading
+            continue
         if is_question_start(line) and current:
-            blocks.append(current)
+            blocks.append((current, current_section))
             current = [line]
-        else:
+            seen_question = True
+        elif is_question_start(line):
+            current = [line]
+            seen_question = True
+        elif seen_question:
             current.append(line)
+        else:
+            continue
     if current:
-        blocks.append(current)
+        blocks.append((current, current_section))
 
     questions: list[dict[str, Any]] = []
     parser_warnings: list[str] = []
-    for index, block in enumerate(blocks, start=1):
+    for index, (block, section) in enumerate(blocks, start=1):
         if not block:
             continue
         start_match = QUESTION_START.match(block[0])
         number = start_match.group(1) if start_match else str(index)
-        raw_stem_source = start_match.group(2).strip() if start_match else block[0]
+        raw_stem_source = question_stem(start_match) if start_match else block[0]
         question_images: list[str] = []
         for image_url in IMAGE_MARKER.findall(raw_stem_source):
             if image_url not in question_images:
@@ -615,16 +776,21 @@ def parse_questions(
             elif line != stem_source:
                 question_lines.append(line)
 
-        question_text = " ".join([stem] + question_lines).strip()
-        if number in answer_map:
+        question_text = TRAILING_MARKERS.sub("", " ".join([stem] + question_lines)).strip()
+        matched_record = answer_matcher.take(number, section)
+        if matched_record is not None:
+            answer = matched_record.answer
+            if matched_record.explanation:
+                explanation_lines = [matched_record.explanation]
+        elif number in answer_map:
             answer = answer_map[number]
+            if explanation_map.get(number):
+                explanation_lines = [explanation_map[number]]
         elif not answer:
             for line in block:
                 if "正确答案" in line or "参考答案" in line:
                     answer = clean_answer(line.split(":", 1)[-1].split("：", 1)[-1])
                     break
-        if explanation_map.get(number):
-            explanation_lines = [explanation_map[number]]
         if not answer:
             parser_warnings.append(f"第 {number} 题未识别到答案")
 
@@ -1092,33 +1258,22 @@ class QuestionBankHandler(BaseHTTPRequestHandler):
             module_id = path_parts[2]
             question_id = path_parts[4]
             payload = read_json_body(self)
-            if "answer" not in payload and "options" not in payload:
-                json_response(self, {"error": "请提供新的选项或正确答案"}, HTTPStatus.BAD_REQUEST)
-                return
 
             db = load_db()
             module, question = find_question(db, module_id, question_id)
             if not module or not question:
                 json_response(self, {"error": "题目不存在"}, HTTPStatus.NOT_FOUND)
                 return
-            try:
-                options = (
-                    normalize_manual_options(payload["options"])
-                    if "options" in payload
-                    else question.get("options", [])
-                )
-                answer = (
-                    normalize_manual_answer(payload.get("answer"), options)
-                    if "answer" in payload
-                    else question.get("answer", [])
-                )
-            except ValueError as exc:
-                json_response(self, {"error": str(exc)}, HTTPStatus.BAD_REQUEST)
-                return
-            if not answer and (question.get("answer") or not options):
-                json_response(self, {"error": "请至少选择或填写一个正确答案；如果暂时没有答案，请先补充选项"}, HTTPStatus.BAD_REQUEST)
-                return
-
+            options = (
+                normalize_manual_options(payload.get("options"))
+                if "options" in payload
+                else question.get("options", [])
+            )
+            answer = (
+                normalize_manual_answer(payload.get("answer"), options)
+                if "answer" in payload
+                else question.get("answer", [])
+            )
             question["options"] = options
             question["answer"] = answer
             question["type"] = question_type(
@@ -1132,7 +1287,7 @@ class QuestionBankHandler(BaseHTTPRequestHandler):
             if "options" in payload:
                 question["optionsSource"] = "manual"
                 question["optionsUpdatedAt"] = utc_now()
-            if answer:
+            if "answer" in payload:
                 question["answerSource"] = "manual"
                 question["answerUpdatedAt"] = utc_now()
             question["source"] = "人工勘误"

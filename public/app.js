@@ -708,21 +708,15 @@ function bindAnswerCorrection(question) {
 async function saveAnswerCorrection(question) {
   const correction = state.practice.correction;
   if (!correction?.open || correction.questionId !== question.id) return;
-  const options = (correction.options || []).map((option) => ({
-    key: String(option.key || "").trim(),
-    text: String(option.text || "").trim(),
-  }));
-  if (options.some((option) => !option.key || !option.text)) {
-    showToast("请补全每个选项的标记和内容，或删除空白选项", "error");
-    return;
-  }
+  const options = (correction.options || [])
+    .map((option) => ({
+      key: String(option.key || "").trim(),
+      text: String(option.text || "").trim(),
+    }))
+    .filter((option) => option.key || option.text);
   const answer = options.length
-    ? [...correction.selected]
-    : [($("#answer-correction-input")?.value || correction.raw || "").trim()];
-  if (!answer.filter(Boolean).length && (question.answer?.length || !options.length)) {
-    showToast("至少选择或填写一个正确答案", "error");
-    return;
-  }
+    ? [...(correction.selected || [])]
+    : [($("#answer-correction-input")?.value || correction.raw || "").trim()].filter(Boolean);
   const entry = state.practice.mode === "wrong-book" ? currentWrongBookEntry() : null;
   const moduleId = entry?.moduleId || state.selectedModule?.id;
   if (!moduleId) return;
